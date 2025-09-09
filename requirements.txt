@@ -1,0 +1,11 @@
+pandas
+requests
+beautifulsoup4
+google-api-python-client
+google-generativeai
+google-genai
+python-dotenv
+lingua-language-detector
+pydantic
+gradio
+tabulate
