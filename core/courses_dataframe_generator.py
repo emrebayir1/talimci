@@ -1,18 +1,23 @@
 """
 Provides asynchronous retrieval, cleaning, and aggregation of online course data
-from Udemy and YouTube, returning a structured pandas DataFrame of course information.
+from Udemy, Coursera, and YouTube, returning a structured pandas DataFrame of
+course information.
 """
 import os
 import asyncio
-import aiohttp
-import random
+import threading
+import time
+import logging
 from dotenv import load_dotenv
 import pandas as pd
 from typing import List, Optional, Any
-from bs4 import BeautifulSoup
+from ddgs import DDGS
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from lingua import LanguageDetectorBuilder
 import re
+
+logger = logging.getLogger("courses_dataframe_generator")
 
 # Utility functions
 def to_float(val, default=0):
@@ -84,251 +89,296 @@ def clean_text(text: str) -> str:
     # Clean up and return
     return text.strip()
 
-class Udemy:
+class _DuckDuckGoRateLimiter:
+    """Since DuckDuckGo does not have an official API, no strict request limit
+    is specified, but we leave a small safety margin to avoid making requests too quickly
+    back-to-back when multiple search terms are triggered simultaneously (the semaphore
+    inside generate_courses_dataframe) and getting temporarily banned/rate-limited.
+    This is not a strict API requirement, but a precautionary throttle."""
 
-    def __init__(self, base_url: str = "https://www.udemy.com/api-2.0/"):
-        self.base_url = base_url
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://www.udemy.com/",
-            "Origin": "https://www.udemy.com",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin"
-        }
-        # Cache for avoiding repeated requests
-        self._search_cache = {}
-        self._course_cache = {}
+    def __init__(self, min_interval: float = 1.0):
+        self.min_interval = min_interval
+        self._lock = asyncio.Lock()
+        self._last_call = 0.0
 
-    @staticmethod
-    def safe_get(data: dict, keys: list, default: Optional[Any] = '') -> Any:
-        if data is None:
-            return default
+    async def acquire(self):
+        async with self._lock:
+            now = time.monotonic()
+            wait = self.min_interval - (now - self._last_call)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_call = time.monotonic()
 
-        current = data
-        for key in keys:
-            if isinstance(current, dict) and key in current:
-                current = current[key]
-            else:
-                return default
-        return current
 
-    async def _make_request_with_circuit_breaker(self, session: aiohttp.ClientSession, url: str,
-                                                 max_retries: int = 2) -> dict:
-        """
-        Request method with circuit breaker pattern.
-        """
-        for attempt in range(max_retries):
-            try:
-                if attempt > 0:
-                    delay = random.uniform(0.5, 1.5) * attempt
-                    await asyncio.sleep(delay)
+# Single limiter shared across the process - kept at the module level
+# so that every new DuckDuckGoSearch/Udemy/Coursera instance doesn't create its own limiter.
+_ddg_rate_limiter = _DuckDuckGoRateLimiter()
 
-                async with session.get(url=url, headers=self.headers) as response:
-                    if response.status == 429:
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(random.uniform(2, 5))
-                            continue
-                        else:
-                            return {}
 
-                    response.raise_for_status()
+class DuckDuckGoSearch:
+    """
+    Common client that fetches DuckDuckGo search results restricted to a single domain
+    via the `site:` operator using the `ddgs` library (formerly `duckduckgo_search`).
+    Both Udemy and Coursera classes use this client.
 
-                    content_type = response.headers.get('content-type', '').lower()
-                    if 'application/json' not in content_type:
-                        return {}
+    Why DuckDuckGo (instead of Serper/Brave/Google CSE):
+    - Udemy's official affiliate API was discontinued; previously, Google Custom Search
+      was used instead, but its free quota is limited to only 100 queries per day.
+    - Coursera's unofficial endpoints like courses.v1/onDemandCourses.v1 could also be
+      silently changed and restricted by Coursera.
+    - Brave Search API was tried, but Brave now requires a payment method (credit card)
+      for new accounts.
+    - Serper.dev's free quota (2500 queries) was a one-time starter quota, and upon exhaustion,
+      switching to paid credits was required.
+    - `ddgs` returns public search results from DuckDuckGo without any API key, registration,
+      or quota; the `site:` operator allows using the same mechanism for both Udemy and Coursera.
+      (Note: Since this is not an official API, temporary rate limits/blocks may occur due to
+      changes on DuckDuckGo's side or aggressive usage; therefore, requests are throttled with
+      `_ddg_rate_limiter`.)
 
-                    data = await response.json()
-                    return data
+    Setup: Not required - `pip install ddgs` is enough, no API key needed.
+    `is_configured` therefore always returns True; this field is kept solely to maintain
+    the same interface as SerperSearch and ensure calling code (Udemy/Coursera) works unchanged.
+    """
 
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(random.uniform(0.5, 2))
-                    continue
-                else:
-                    return {}
+    def __init__(self):
+        self._is_configured = True
 
-        return {}
+    @property
+    def is_configured(self) -> bool:
+        return self._is_configured
 
-    async def search_cached(self, session: aiohttp.ClientSession, search_term: str) -> dict:
-        if search_term in self._search_cache:
-            return self._search_cache[search_term]
+    async def search_site(self, query: str, site: str, max_results: int = 10) -> List[dict]:
+        """Searches with the `site:{site} {query}` query and returns a list of
+        [{"title", "url", "description"}, ...]."""
+        await _ddg_rate_limiter.acquire()
 
-        query = search_term.replace(" ", "+")
-        search_url = self.base_url + f"search-suggestions/?q={query}"
+        search_query = f"site:{site} {query}"
 
-        result = await self._make_request_with_circuit_breaker(session, search_url)
-        self._search_cache[search_term] = result
-        return result
-
-    async def get_alternative_queries(self, session: aiohttp.ClientSession, search_term: str) -> List[str]:
         try:
-            query = search_term.replace(" ", "+")
-            alternative_query_url = self.base_url + f"related-searches/?q={query}"
-
-            data = await self._make_request_with_circuit_breaker(session, alternative_query_url)
-            return [item['phrase'] for item in data.get('related_searches', [])[:3]]
-        except:
+            loop = asyncio.get_running_loop()
+            results = await loop.run_in_executor(
+                None,
+                lambda: DDGS().text(search_query, max_results=max_results),
+            )
+        except Exception:
+            logger.exception("DuckDuckGo Search request failed: '%s'", search_query)
             return []
 
-    async def filter_search_results_batch(self, session: aiohttp.ClientSession, search_terms: List[str]) -> List[dict]:
-        tasks = [self.search_cached(session, term) for term in search_terms]
-        all_results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [
+            {
+                "title": item.get("title", ""),
+                "url": item.get("href", ""),
+                "description": item.get("body", ""),
+            }
+            for item in (results or [])
+        ]
 
-        filtered_results = []
-        for result in all_results:
-            if isinstance(result, dict) and 'results' in result:
-                filtered = [
-                    {'id': item['id'], '_class': item['_class']}
-                    for item in result['results']
-                    if item.get('id', 0) != 0
-                ]
-                filtered_results.extend(filtered)
 
-        return filtered_results
+class Udemy:
+    """
+    DOES NOT USE Udemy's own API. The official Affiliate API was discontinued
+    (even with an affiliate account, API client approval was a separate process and usually
+    resulted in a 403 Forbidden). Instead, public web searches restricted to `site:udemy.com/course`
+    are performed using the common `DuckDuckGoSearch` client (Google Custom Search was tried first,
+    then Brave, then Serper).
 
-    async def get_user_courses(self, session: aiohttp.ClientSession, user_id: int) -> List[int]:
-        course_ids = []
-        url = self.base_url + f"users/{user_id}/taught-profile-courses/"
-        page_count = 0
-        max_pages = 3
+    IMPORTANT LIMITATIONS:
+    - This only searches public Udemy pages returned by DuckDuckGo; it is not a direct query to
+      Udemy's own catalog. Therefore, structured fields like price, instructor name, and language
+      DO NOT COME THROUGH — only title, link, and search result snippet are obtained.
+      Since `is_paid` is unknown, it returns None here; the calling function
+      (fetch_course_dataframe) applies a reasonable assumption (courses on Udemy are mostly paid).
 
-        while url and page_count < max_pages:
-            data = await self._make_request_with_circuit_breaker(session, url)
-            if not data:
-                break
+    Setup: Not required - DuckDuckGoSearch does not require an API key, so
+    `is_configured` always returns True.
+    """
 
-            results = data.get("results", [])
-            ids = [item['id'] for item in results if item.get('_class') == 'course']
-            course_ids.extend(ids)
+    def __init__(self, ddg: Optional["DuckDuckGoSearch"] = None):
+        self.ddg = ddg or DuckDuckGoSearch()
+        self._course_cache = {}
 
-            url = data.get("next")
-            page_count += 1
+    @property
+    def is_configured(self) -> bool:
+        return self.ddg.is_configured
 
-        return course_ids
+    async def retrieve_udemy_courses(self, search_term: str, max_results: int = 10) -> List[dict]:
+        if not self.is_configured:
+            return []
 
-    async def get_course_info(self, session: aiohttp.ClientSession, course_id: int) -> dict:
-        if course_id in self._course_cache:
-            return self._course_cache[course_id]
+        if search_term in self._course_cache:
+            return self._course_cache[search_term]
 
-        course_url = (
-            f"{self.base_url}courses/{course_id}/?fields[course]="
-            "title,headline,url,price_detail,visible_instructors,locale,description,content_info"
+        results = await self.ddg.search_site(search_term, site="udemy.com/course", max_results=max_results)
+
+        courses = []
+        for item in results:
+            link = item.get("url", "")
+            if "udemy.com/course" not in link:
+                continue
+            courses.append({
+                "id": link,
+                "title": clean_text(item.get("title", "")),
+                "instructors": "",
+                "url": link,
+                "language": "",
+                "price": None,
+                "price_currency": "",
+                "description": clean_text(item.get("description", "")),
+                "content_info": "",
+                "is_paid": None,  # unknown - calling side applies assumption
+            })
+
+        logger.info(
+            "DuckDuckGo Search (Udemy) '%s': %d results found.",
+            search_term, len(courses),
         )
+        self._course_cache[search_term] = courses
+        return courses
 
-        course_data = await self._make_request_with_circuit_breaker(session, course_url)
-        if not course_data:
-            return {}
 
-        # Clean description text
-        raw_description = self.safe_get(course_data, ['description'], '')
-        clean_description = clean_text(
-            BeautifulSoup(raw_description, "html.parser").get_text(separator=" ", strip=True))
+class Coursera:
+    """
+    DOES NOT USE Coursera's own API. Previously, unofficial endpoints like `courses.v1` /
+    `onDemandCourses.v1` (which do not require OAuth but could be changed and restricted by
+    Coursera at any time) were tried; as of 2026-07, their `search` finder started returning
+    405 with "Routing error: finder 'search' not implemented".
+    Instead, public web searches restricted to `site:coursera.org/learn` are performed
+    using the common `DuckDuckGoSearch` client.
 
-        course = {
-            'id': self.safe_get(course_data, ['id']),
-            'title': clean_text(self.safe_get(course_data, ['title'])),
-            'instructors': ', '.join([
-                clean_text(self.safe_get(item, ['title']))
-                for item in self.safe_get(course_data, ['visible_instructors'], default=[])
-            ]),
-            'url': 'https://www.udemy.com' + self.safe_get(course_data, ['url']),
-            'language': self.safe_get(course_data, ['locale', 'locale']),
-            'price': self.safe_get(course_data, ['price_detail', 'amount']),
-            'price_currency': self.safe_get(course_data, ['price_detail', 'currency']),
-            'description': clean_description,
-            'content_info': clean_text(str(self.safe_get(course_data, ['content_info'], ''))),
-        }
+    IMPORTANT LIMITATIONS:
+    - This only searches public Coursera pages returned by DuckDuckGo; it is not a direct query to
+      Coursera's own catalog. Since some fields like instructor name do not come from search results,
+      `instructors` is left blank. `is_paid` is assumed to be False by default since most courses on Coursera
+      have a free "audit" mode (only the certificate is paid) — this is not definitive information, but a reasonable assumption.
 
-        self._course_cache[course_id] = course
-        return course
+    Setup: Not required - DuckDuckGoSearch does not require an API key, so
+    `is_configured` always returns True.
+    """
 
-    async def get_udemy_data(self, session: aiohttp.ClientSession, search_term: str) -> List[int]:
-        alternative_queries = await self.get_alternative_queries(session, search_term)
-        queries = [search_term] + alternative_queries[:2]
+    def __init__(self, ddg: Optional["DuckDuckGoSearch"] = None):
+        self.ddg = ddg or DuckDuckGoSearch()
+        self._course_cache = {}
 
-        all_results = await self.filter_search_results_batch(session, queries)
+    @property
+    def is_configured(self) -> bool:
+        return self.ddg.is_configured
 
-        course_ids = set()
-        user_ids = []
+    async def retrieve_courses(self, search_term: str, max_results: int = 15) -> List[dict]:
+        if not self.is_configured:
+            return []
 
-        for result in all_results:
-            if result['_class'] == 'course':
-                course_ids.add(result['id'])
-            elif result['_class'] == 'user':
-                user_ids.append(result['id'])
+        if search_term in self._course_cache:
+            return self._course_cache[search_term]
 
-        if user_ids:
-            user_ids = user_ids[:5]
-            user_tasks = [self.get_user_courses(session, user_id) for user_id in user_ids]
-            user_results = await asyncio.gather(*user_tasks, return_exceptions=True)
+        results = await self.ddg.search_site(search_term, site="coursera.org/learn", max_results=max_results)
 
-            for result in user_results:
-                if isinstance(result, list):
-                    course_ids.update(result)
+        courses = []
+        for item in results:
+            link = item.get("url", "")
+            if "coursera.org/learn" not in link:
+                continue
+            courses.append({
+                "id": link,
+                "title": clean_text(item.get("title", "")),
+                "instructors": "",
+                "url": link,
+                "language": "",
+                "price": None,
+                "price_currency": "",
+                "description": clean_text(item.get("description", "")),
+                "content_info": "",
+                "is_paid": False,
+            })
 
-        return list(course_ids)
-
-    async def retrieve_udemy_courses(self, search_term: str, max_concurrent: int = 10) -> List[dict]:
-        connector = aiohttp.TCPConnector(
-            limit=max_concurrent * 2,
-            limit_per_host=max_concurrent,
-            keepalive_timeout=60,
-            enable_cleanup_closed=True,
-            ttl_dns_cache=300
+        logger.info(
+            "DuckDuckGo Search (Coursera) '%s': %d results found.",
+            search_term, len(courses),
         )
-        timeout = aiohttp.ClientTimeout(total=30, connect=5)
+        self._course_cache[search_term] = courses
+        return courses
 
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            try:
-                course_ids = await self.get_udemy_data(session, search_term)
-
-                if not course_ids:
-                    return []
-
-                course_ids = list(set(course_ids))[:50]
-
-                semaphore = asyncio.Semaphore(max_concurrent)
-
-                async def get_course_with_semaphore(course_id):
-                    async with semaphore:
-                        return await self.get_course_info(session, course_id)
-
-                tasks = [get_course_with_semaphore(course_id) for course_id in course_ids]
-                courses = await asyncio.gather(*tasks, return_exceptions=True)
-
-                valid_courses = [
-                    course for course in courses
-                    if isinstance(course, dict) and course.get('id')
-                ]
-
-                return valid_courses
-
-            except Exception as e:
-                print(f"Udemy retrieval error: {e}")
-                return []
 
 class YouTube:
     """
     YouTube API wrapper.
+
+    Same approach as youtube_manager.py in the Hey DJ project: multiple
+    YouTube API keys/accounts can be defined, searches are distributed among them
+    round-robin style (other accounts don't sit idle until a single account is exhausted),
+    and when an account exhausts its daily quota, it automatically switches to the next account.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    _exhausted_keys: set = set()
+
+    _rr_index: int = 0
+    _rr_lock = threading.Lock()
+
+    def __init__(self, api_keys: Optional[List[str]] = None):
         load_dotenv()
-        self.api_key = api_key or os.getenv("YOUTUBE_API")
-        if not self.api_key:
+        self.api_keys = api_keys or self._load_api_keys()
+        if not self.api_keys:
             raise ValueError("YouTube API key required")
 
-        self.youtube = build('youtube', 'v3', developerKey=self.api_key)
         self.language_detector = LanguageDetectorBuilder.from_all_languages().build()
         self._transcript_cache = {}
+        self._clients = {}  # key -> googleapiclient service (lazily built, reused)
+
+    @staticmethod
+    def _load_api_keys() -> List[str]:
+        """YOUTUBE_API_KEYS (comma-separated, multiple accounts) takes priority;
+        otherwise falls back to singular YOUTUBE_API for backwards compatibility."""
+        raw = os.getenv("YOUTUBE_API_KEYS", "")
+        keys = [k.strip() for k in raw.split(",") if k.strip()]
+        if keys:
+            return keys
+        single = os.getenv("YOUTUBE_API", "").strip()
+        return [single] if single else []
+
+    def _keys_to_try(self) -> List[str]:
+        """Returns configured keys starting from a rotating starting point (round-robin)
+        across calls, so searches start spread across all accounts instead of always
+        using the same account. Keys known to be quota-exhausted are moved to the end
+        of the list (though tried as a last resort just in case quotas reset daily)."""
+        n = len(self.api_keys)
+        if n == 0:
+            return []
+
+        with self._rr_lock:
+            start = YouTube._rr_index % n
+            YouTube._rr_index += 1
+
+        rotated = self.api_keys[start:] + self.api_keys[:start]
+        fresh = [k for k in rotated if k not in self._exhausted_keys]
+        exhausted = [k for k in rotated if k in self._exhausted_keys]
+        return fresh + exhausted
+
+    def _client_for(self, key: str):
+        client = self._clients.get(key)
+        if client is None:
+            client = build('youtube', 'v3', developerKey=key)
+            self._clients[key] = client
+        return client
+
+    @staticmethod
+    def _mask(key: str) -> str:
+        return f"...{key[-6:]}" if len(key) > 6 else "***"
+
+    @staticmethod
+    def _is_quota_error(e: HttpError) -> bool:
+        """Recognizes 403 quotaExceeded/dailyLimitExceeded or 429 as a quota error;
+        distinguishes from other 403 reasons (e.g. invalid/restricted key) so the next
+        account is still tried in those cases."""
+        status = getattr(getattr(e, "resp", None), "status", None)
+        if status == 429:
+            return True
+        if status != 403:
+            return False
+        try:
+            content = e.content.decode("utf-8", errors="ignore") if isinstance(e.content, bytes) else str(e.content)
+        except Exception:
+            content = str(e)
+        return "quota" in content.lower()
 
     def get_language(self, text: str) -> str:
         if len(text) < 10:
@@ -342,9 +392,6 @@ class YouTube:
 
 
     async def search_videos(self, keyword: str, max_results: int = 15) -> List[dict]:
-        videos = []
-        video_ids = set()
-
         request_params = {
             'q': keyword,
             'part': 'snippet',
@@ -354,35 +401,49 @@ class YouTube:
             'videoDuration': 'long'
         }
 
-        try:
-            response = self.youtube.search().list(**request_params).execute()
+        for key in self._keys_to_try():
+            videos = []
+            video_ids = set()
+            try:
+                youtube = self._client_for(key)
+                response = youtube.search().list(**request_params).execute()
 
-            for item in response['items']:
-                vid_id = item['id']['videoId']
-                if vid_id not in video_ids:
-                    video_ids.add(vid_id)
-                    videos.append({
-                        'videoId': vid_id,
-                        'title': clean_text(item['snippet']['title']),
-                        'channel': clean_text(item['snippet']['channelTitle']),
-                        'url': f"https://www.youtube.com/watch?v={vid_id}"
-                    })
+                for item in response['items']:
+                    vid_id = item['id']['videoId']
+                    if vid_id not in video_ids:
+                        video_ids.add(vid_id)
+                        videos.append({
+                            'videoId': vid_id,
+                            'title': clean_text(item['snippet']['title']),
+                            'channel': clean_text(item['snippet']['channelTitle']),
+                            'url': f"https://www.youtube.com/watch?v={vid_id}"
+                        })
 
-            if video_ids:
-                details = self.youtube.videos().list(
-                    part='snippet,statistics,contentDetails',
-                    id=','.join(video_ids)
-                ).execute()
+                if video_ids:
+                    details = youtube.videos().list(
+                        part='snippet,statistics,contentDetails',
+                        id=','.join(video_ids)
+                    ).execute()
 
-                id_to_details = {item['id']: item for item in details['items']}
-                tasks = [self._process_video_details(video, id_to_details) for video in videos]
-                videos = await asyncio.gather(*tasks)
+                    id_to_details = {item['id']: item for item in details['items']}
+                    tasks = [self._process_video_details(video, id_to_details) for video in videos]
+                    videos = await asyncio.gather(*tasks)
 
-            return videos
+                return videos
 
-        except Exception as e:
-            print(f"YouTube search error: {e}")
-            return []
+            except HttpError as e:
+                if self._is_quota_error(e):
+                    self._exhausted_keys.add(key)
+                    print(f"YouTube account {self._mask(key)} exhausted its daily quota; trying the next account.")
+                else:
+                    print(f"YouTube search error (account {self._mask(key)}): {e}")
+                continue
+            except Exception as e:
+                print(f"YouTube search error (account {self._mask(key)}): {e}")
+                continue
+
+        print(f"All configured YouTube accounts were tried, no results obtained for '{keyword}'.")
+        return []
 
     async def _process_video_details(self, video: dict, id_to_details: dict) -> dict:
         vid_id = video['videoId']
@@ -401,7 +462,11 @@ class YouTube:
         return video
 
 async def fetch_course_dataframe(search_term: str) -> pd.DataFrame:
-    udemy = Udemy()
+    # Udemy and Coursera now share the same DuckDuckGo (ddgs) client
+    # (no API key required, uses a single rate limiter).
+    ddg = DuckDuckGoSearch()
+    udemy = Udemy(ddg)
+    coursera = Coursera(ddg)
 
     try:
         youtube = YouTube()
@@ -410,10 +475,17 @@ async def fetch_course_dataframe(search_term: str) -> pd.DataFrame:
 
     tasks = []
 
-    udemy_task = asyncio.create_task(
-        udemy.retrieve_udemy_courses(search_term, max_concurrent=15)
-    )
-    tasks.append(('udemy', udemy_task))
+    if udemy.is_configured:
+        udemy_task = asyncio.create_task(
+            udemy.retrieve_udemy_courses(search_term, max_results=15)
+        )
+        tasks.append(('udemy', udemy_task))
+
+    if coursera.is_configured:
+        coursera_task = asyncio.create_task(
+            coursera.retrieve_courses(search_term, max_results=15)
+        )
+        tasks.append(('coursera', coursera_task))
 
     if youtube:
         youtube_task = asyncio.create_task(
@@ -435,17 +507,24 @@ async def fetch_course_dataframe(search_term: str) -> pd.DataFrame:
                 if not title:
                     continue
 
-                if platform == 'udemy':
-                    # Create clean text for Udemy courses
+                if platform in ('udemy', 'coursera'):
+                    # Create clean text for Udemy/Coursera courses
                     content_text = f"{c.get('description', '')} {c.get('content_info', '')}"
                     clean_content = clean_text(content_text)
 
+                    is_paid = c.get('is_paid')
+                    if is_paid is None:
+                        # Google CSE fallback path (Udemy) does not provide price info;
+                        # since a large portion of the Udemy catalog is paid, we accept True
+                        # as a reasonable assumption — this is not definitive information.
+                        is_paid = to_float(c.get('price', 0)) > 0 if c.get('price') is not None else True
+
                     row = {
-                        'platform': 'udemy',
+                        'platform': platform,
                         'title': title,
                         'channel_or_instructor': c.get('instructors', ''),
                         'url': c.get('url', ''),
-                        'is_paid': to_float(c.get('price', 0)) > 0,
+                        'is_paid': is_paid,
                         'language': c.get('language', ''),
                         'description': c.get('description',''),
                         'text': f"Title: {title}, Content: {clean_content}",

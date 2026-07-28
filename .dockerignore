@@ -1,0 +1,9 @@
+.venv
+.env
+__pycache__
+**/__pycache__
+.git
+.gitignore
+groq_debug.log
+README.md
+chainlit.md

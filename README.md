@@ -1,237 +1,263 @@
 # 🎓 Talimci - Personalized Course Recommendation Assistant
 
-Talimci is an AI-powered course recommendation system that helps users find the most suitable learning resources based on their goals, experience, and preferences. Using advanced language models and intelligent course retrieval, Talimci provides personalized recommendations from various online learning platforms.
+Talimci is an AI-powered chat assistant that helps users find the most suitable courses for their learning goals. It builds a short profile through a guided conversation (goal, optional resume, optional target job posting, and price preference), searches Udemy, Coursera, and YouTube for relevant courses, and then recommends the best matches with the reasoning behind them.
 
 ## 🌐 Demo
 
-🔗 **[Try Talimci Live Demo](https://huggingface.co/spaces/emrebayir/talimci)** 
-
+🔗 **[Try Talimci Live Demo](https://talimci.emrebayir.com)**
 
 ## ✨ Features
 
-- **Intelligent Profile Building**: Analyzes user input to create detailed learning profiles
-- **Multi-language Support**: Works with users in their preferred language
-- **Smart Course Retrieval**: Searches and retrieves relevant courses from YouTube and Udemy
-- **Personalized Recommendations**: Provides tailored course suggestions based on user goals
-- **Interactive Chat Interface**: Easy-to-use conversational interface built with Gradio
-- **Continuous Learning**: Adapts recommendations based on ongoing conversations
+- **Guided Profile Wizard**: Asks one question at a time (learning goal, resume, target job posting, paid/free preference) and adapts based on previous answers
+- **Multi-provider LLM Support**: Works with Google Gemini, Groq, or OpenRouter — pick whichever provider/model fits your needs and budget
+- **Smart Course Retrieval**: Searches and aggregates courses from Udemy, Coursera, and YouTube into a structured dataset
+- **Personalized Recommendations**: Matches courses to the user's goal, background, and target role, with explanations
+- **Conversational Follow-ups**: Users can ask for more detail, request different courses, or change their preferences at any point in the chat
+- **Chat-based Interface**: Built with [Chainlit](https://chainlit.io/), including button-based quick replies for closed-choice questions
+
+## 🏗️ How It Works
+
+1. **Profile wizard** (`core/user_orienter.py`) — an LLM-guided, step-by-step wizard collects the learning goal and (optionally) a resume, a job posting, and a subscription preference (paid/free/either).
+2. **Keyword & title generation** (`core/keywords_generator.py`, `core/course_titles_generator.py`) — the profile is turned into concrete search keywords and candidate course titles.
+3. **Course retrieval** (`core/courses_dataframe_generator.py`, `core/courses_retreiver.py`) — courses are fetched from Udemy, Coursera, and YouTube (via the YouTube Data API) and cleaned into a single pandas DataFrame.
+4. **Recommendation** (`core/course_recommender.py`) — the LLM reviews the catalog and the conversation so far, and returns a personalized shortlist with explanations. Every follow-up message goes through this step again, so the recommendations keep adapting as the conversation continues.
 
 ## 🚀 Getting Started
 
 ### Prerequisites
 
-- Python 3.8 or higher
-- Google Gemini API key
-- YouTube Data API key (optional, for enhanced course data)
+- Python 3.12 (or Docker, if you prefer not to install Python locally)
+- An API key for **at least one** LLM provider: Gemini, Groq, or OpenRouter
+- A YouTube Data API v3 key (used to fetch YouTube courses)
 
-### Installation
+### Option A — Local setup with venv
 
 1. **Clone the repository**
+   
    ```bash
    git clone https://github.com/emrebayir1/talimci
    cd talimci
    ```
 
-2. **Install required dependencies**
+2. **Create and activate a virtual environment**
+   
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate      # on Windows: .venv\Scripts\activate
+   ```
+
+3. **Install dependencies**
+   
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Set up environment variables**
+4. **Configure environment variables**
    
-   Create a `.env` file in the root directory:
+   Copy the example file and fill in your keys:
+   
    ```bash
-   touch .env
+   cp .env.Example .env
    ```
    
-   Add your API keys to the `.env` file:
-   ```env
-   GEMINI_API=your_google_gemini_api_key_here
-   YOUTUBE_API=your_youtube_data_api_key_here
+   See the [API Keys Setup](#-api-keys-setup) section below for where to get each key.
+
+5. **Run the app**
+   
+   ```bash
+   chainlit run app.py -w
    ```
 
-4. **Run the application**
+6. **Open the interface**
+   
+   Chainlit will print a local URL in the terminal (typically `http://localhost:8000`). Open it in your browser to start chatting.
+
+### Option B — Docker
+
+1. **Clone the repository and configure your `.env`**
+   
    ```bash
-   python app.py
+   git clone https://github.com/emrebayir1/talimci
+   cd talimci
+   cp .env.Example .env
+   ```
+   
+   Fill in your API keys in `.env` as described below.
+
+2. **Build the image**
+   
+   ```bash
+   docker build -f .Dockerfile -t talimci .
    ```
 
-5. **Access the interface**
+3. **Run the container**
    
-   Open your browser and navigate to the URL shown in the terminal (typically `http://127.0.0.1:7860`)
+   ```bash
+   docker run --env-file .env -p 8000:8000 talimci
+   ```
+
+4. **Open the interface**
+   
+   Visit `http://localhost:8000` in your browser.
 
 ## 🔑 API Keys Setup
 
-### Google Gemini API Key
+Talimci needs an LLM provider key (choose one or more — you select which one is active via `LLM_PROVIDER`) and a YouTube Data API key. Add whichever keys you obtain to your `.env` file.
 
-1. Visit [Google AI Studio](https://makersuite.google.com/app/apikey)
+### Google Gemini API Key (`GEMINI_API`)
+
+1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey)
 2. Sign in with your Google account
+3. Click "Create API key"
+4. Copy the key into `GEMINI_API` in your `.env` file
+
+### Groq API Key (`GROQ_API`)
+
+1. Go to [Groq Console](https://console.groq.com/keys)
+2. Sign in or create a free account
 3. Create a new API key
-4. Copy the key and add it to your `.env` file
+4. Copy the key into `GROQ_API` in your `.env` file
 
-### YouTube Data API Key (Optional)
+### OpenRouter API Key (`OPENROUTER_API_KEY`)
 
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project or select an existing one
-3. Enable the YouTube Data API v3
-4. Create credentials (API key)
-5. Copy the key and add it to your `.env` file
+1. Go to [OpenRouter](https://openrouter.ai/keys)
+2. Sign in or create an account
+3. Create a new API key (OpenRouter offers several `:free` models, so no payment method is required to get started)
+4. Copy the key into `OPENROUTER_API_KEY` in your `.env` file
 
-## 💬 How to Use
+### YouTube Data API Key (`YOUTUBE_API_KEYS`)
 
-1. **Start a conversation**: Launch the application and begin by sharing your learning goals
-2. **Provide context**: You can also share:
-   - Your current experience level
-   - Career objectives
-   - Preference for free or paid courses
-   - Time constraints
-   - Specific technologies or skills you want to learn
+1. Open the [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project (or select an existing one)
+3. Go to **APIs & Services → Library** and enable **YouTube Data API v3**
+4. Go to **APIs & Services → Credentials** and create an **API key**
+5. Copy the key into `YOUTUBE_API_KEYS` in your `.env` file
 
-3. **Get recommendations**: The system will analyze your input and provide personalized course recommendations
+> `.env.Example` also contains an `OPENAI_API_KEY` placeholder for future use; it isn't required by the current codebase.
 
-4. **Continue the conversation**: Ask follow-up questions, request alternative courses, or refine your requirements
+## 🛠️ Configuration
 
-### Example Interactions
+Below are the environment variables read by the app (see `.env.Example` for the full template):
 
-**Basic Learning Goal:**
+| Variable             | Required                 | Description                                                                                                                                            |
+| -------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LLM_PROVIDER`       | No                       | Which LLM provider to use: `gemini`, `groq`, or `openrouter`. Default: `gemini`                                                                        |
+| `CHAT_MODEL`         | No                       | Model name for the selected provider (e.g. `gemini-2.5-flash`, a Groq model, or an OpenRouter model id). Falls back to a sensible default per provider |
+| `GEMINI_API`         | Only if using Gemini     | Google Gemini API key                                                                                                                                  |
+| `GROQ_API`           | Only if using Groq       | Groq API key                                                                                                                                           |
+| `OPENROUTER_API_KEY` | Only if using OpenRouter | OpenRouter API key                                                                                                                                     |
+| `YOUTUBE_API_KEYS`   | Yes                      | YouTube Data API v3 key used to fetch YouTube courses                                                                                                  |
+| `GEMINI_RPM_LIMIT`   | No                       | Requests-per-minute throttle for Gemini calls (default: `4`)                                                                                           |
+| `GROQ_TPM_LIMIT`     | No                       | Tokens-per-minute throttle for Groq calls (default: `8000`)                                                                                            |
+| `COURSE_TOP_N`       | No                       | How many courses to keep per search when building the catalog                                                                                          |
+
+## 💬 Example Interactions
+
+**Basic learning goal:**
+
 ```
-User: "I want to learn web development. I'm a complete beginner and prefer free courses."
-System: "Great! I'll help you find beginner-friendly web development courses..."
+Assistant: What's your learning goal?
+User: I want to learn web development. I'm a complete beginner.
 ```
 
-**Career-Focused Request:**
+**Career-focused request, with resume/job posting:**
+
 ```
-User: "I'm aiming for a data scientist position. I have Python basics but need ML knowledge."
-System: "Perfect! Based on your Python background and data science goals, here are some excellent machine learning courses..."
+Assistant: Would you like to share your resume?
+User: Sure — [pastes resume]
+Assistant: Do you have a target job posting in mind?
+User: Yes — [pastes job posting]
 ```
 
-**Follow-up Questions:**
+**Follow-up refinement, after the first recommendations:**
+
 ```
-User: "Can you recommend something more advanced in React?"
-User: "I changed my mind. Can you recommend some courses about Javascript instead of Python?"
+User: Can you recommend something more advanced in React instead?
+User: Actually, show me free courses only.
 ```
 
 ## 🏗️ Project Structure
 
 ```
-├── app.py                               # Launches the Gradio interface
+├── app.py                               # Chainlit app: profile wizard + chat loop
 ├── requirements.txt                     # Project dependencies
+├── .Dockerfile                          # Docker build definition
+├── .env.Example                         # Environment variable template (copy to .env)
+├── chainlit.md                          # Welcome text shown in the Chainlit UI
 ├── README.md                            # Project description
-├── .env                                 #  # Stores environment variables (Create this)
 │
 ├── core/                                # Application logic
-│   ├── __init__.py                      # Core module package
-│   ├── course_recommender.py            # Course recommendation engine
-│   ├── courses_retriever.py             # Searches and recommends courses
-│   ├── courses_dataframe_generator.py   # Fetches and structures course data
-│   ├── course_titles_generator.py       # Generates course titles
-│   ├── keywords_generator.py            # Generates search keywords
-│   ├── learning_session.py              # User session and profile model
-│   └── user_orienter.py                 # Builds user profile
+│   ├── learning_session.py              # LearningSession data model (Pydantic)
+│   ├── user_orienter.py                 # Profile wizard: asks for goal/resume/job/preference
+│   ├── keywords_generator.py            # Generates search keywords from the profile
+│   ├── course_titles_generator.py       # Generates candidate course titles
+│   ├── courses_dataframe_generator.py   # Fetches & cleans course data (Udemy, Coursera, YouTube) into a DataFrame
+│   ├── courses_retreiver.py             # Orchestrates course search and filtering
+│   └── course_recommender.py            # Builds the final recommendation using the LLM
 │
-└── utils/                               # Helper functions
-    ├── __init__.py                      # Utils module package
-    └── utilities.py                     # Async and retry helpers
+├── utils/
+│   ├── models.py                        # LLM provider abstraction (Gemini / Groq / OpenRouter)
+│   └── utilities.py                     # Async helpers, retry logic
+│
+└── public/                              # Static assets (avatars, favicon, stylesheet) for the Chainlit UI
 ```
 
-## 🔧 Core Components
+## 📋 Key Dependencies
 
-### Learning Session Management
-- Tracks user interactions and preferences
-- Maintains conversation context
-- Stores user profile and course history
-
-### Course Retrieval System
-- Searches Udemy and YouTube
-- Filters courses based on user criteria
-- Retrieves detailed course information
-
-### Recommendation Engine
-- Analyzes user goals and experience
-- Matches users with suitable courses
-- Provides personalized explanations
-
-### User Profiling
-- Extracts learning objectives from conversations
-- Analyzes resume (CV) and job postings
-- Identifies Subscription type (paid/free/all)
-- Builds comprehensive learner profiles for personalized course recommendations
-
-## 🛠️ Configuration
-
-### Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GEMINI_API` | ✅ Yes | Google Gemini API key for AI-powered recommendations |
-| `YOUTUBE_API` | ✅ Yes| YouTube Data API key for enhanced course data |
-
-### Customization Options
-
-You can customize various aspects of the application by modifying the core modules:
-
-- **Course Sources**: Add new learning platforms in the course retriever
-- **Recommendation Logic**: Adjust the recommendation algorithms
-- **UI Interface**: Customize the Gradio interface in `app.py`
-- **LLM & Prompts**: Improve or replace language models and prompts for better recommendations
-
-## 📋 Dependencies
-
-The application requires the following Python packages:
-
-- `pandas` - Data manipulation and analysis
-- `requests` - HTTP library for API calls
-- `beautifulsoup4` - Web scraping and HTML parsing
-- `google-api-python-client` - Google APIs client library
-- `google-generativeai` - Google's Generative AI library
-- `google-genai` - Additional Google AI utilities
-- `python-dotenv` - Environment variable management
-- `lingua-language-detector` - Language detection
-- `pydantic` - Data validation and settings management
-- `gradio` - Web interface framework
+- `chainlit` — chat UI framework powering the interface
+- `pandas` — building and manipulating the course catalog
+- `ddgs` — web search used during course discovery
+- `google-api-python-client` — YouTube Data API client
+- `google-genai` — Gemini API client
+- `lingua-language-detector` — language detection for user input
+- `pydantic` — data validation for the `LearningSession` model
+- `requests` / `httpx` / `httpcore` — HTTP calls to LLM providers
 
 ## 🚨 Troubleshooting
 
-### Common Issues
+**API key errors:**
 
-**API Key Errors:**
-- Ensure your `.env` file is in the root directory
-- Verify that your API keys are valid and have proper permissions
-- Check that there are no extra spaces or quotes around the keys
+- Make sure `.env` is in the project root (not `.env.Example`)
+- Double check `LLM_PROVIDER` matches the key you actually filled in
+- Make sure there are no extra spaces or quotes around key values
 
-**Module Import Errors:**
-- Make sure all requirements are installed: `pip install -r requirements.txt`
-- Verify you're running Python 3.8 or higher
-- Check that all core modules are present in the `core/` directory
+**No courses returned / empty catalog:**
 
-### Getting Help
+- Verify `YOUTUBE_API_KEYS` is valid and the YouTube Data API v3 is enabled on that Google Cloud project
+- Check your terminal logs — provider rate limits (`GEMINI_RPM_LIMIT`, `GROQ_TPM_LIMIT`) may be throttling requests
 
-If you encounter issues:
-1. Check the terminal output for detailed error messages
-2. Verify all dependencies are correctly installed
-3. Ensure your API keys have the necessary permissions
-4. Make sure your internet connection is stable for API calls
+**Docker container exits immediately:**
+
+- Confirm you passed `--env-file .env` when running `docker run`
+- Check `docker logs <container_id>` for the underlying error
+
+## 🧭 Next Steps
+
+Planned improvements for upcoming versions:
+
+- **File upload support** — letting users upload their CV and the target job posting as files (PDF/DOCX), instead of pasting text
+- **UI improvements** — general polish of the chat experience and quick-reply widgets
+- **Excel export** — allowing users to download the full list of found courses (not just the shortlist shown in chat) as an Excel file, likely by first presenting it as a proper table in the UI instead of a raw DataFrame
 
 ## 🤝 Contributing
 
-I welcome contributions to improve Talimci! Here's how you can help:
+Contributions are welcome! Here's how to help:
 
 1. **Fork the repository**
 2. **Create a feature branch**: `git checkout -b feature-name`
 3. **Make your changes** and test thoroughly
 4. **Commit your changes**: `git commit -am 'Add new feature'`
 5. **Push to the branch**: `git push origin feature-name`
-6. **Create a Pull Request**
+6. **Open a Pull Request**
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License — see the LICENSE file for details.
 
 ## 🙏 Acknowledgments
 
-- Built with [Gradio](https://gradio.app/) for the web interface
-- Powered by [Google Gemini](https://deepmind.google/technologies/gemini/) for AI recommendations
-- Thanks to all the open-source libraries that made this project possible
-
+- Built with [Chainlit](https://chainlit.io/) for the chat interface
+- Powered by [Google Gemini](https://deepmind.google/technologies/gemini/), [Groq](https://groq.com/), and [OpenRouter](https://openrouter.ai/) for AI recommendations
 
 ---
 

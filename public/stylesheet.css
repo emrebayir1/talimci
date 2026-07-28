@@ -1,0 +1,34 @@
+/* Talimci - chatbot görünümü için hafif dokunuşlar.
+   NOT: Chainlit'in ürettiği class isimleri sürümden sürüme değişebiliyor;
+   burada büyük çoğunlukla stabil olan data-testid / role seçicilerini
+   kullandık. Beklediğin gibi görünmeyen bir yer olursa, tarayıcının
+   "İncele" (DevTools) aracıyla o elemanın class'ını bulup burada
+   üzerine yazabilirsin. */
+
+/* Mesaj balonlarını yuvarlat + hafif gölge ver, biraz daha "chat app" gibi hissettirsin */
+[data-testid="message"],
+.message-content {
+  border-radius: 16px !important;
+}
+
+/* Avatarları belirginleştir: biraz büyüt, hafif çerçeve ekle */
+[data-testid="message"] img[alt] {
+  border-radius: 50% !important;
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.35);
+}
+
+/* Kullanıcı mesajlarını hafifçe farklı bir arka planla ayır ki
+   "kim konuşuyor" bir bakışta netleşsin */
+[data-testid="user-message"] {
+  background: rgba(45, 212, 191, 0.10) !important;
+  border-radius: 16px 16px 4px 16px !important;
+}
+
+[data-testid="assistant-message"] {
+  border-radius: 16px 16px 16px 4px !important;
+}
+
+/* Butonlu (AskActionMessage) seçenekleri daha "chip" gibi göster */
+button[class*="action"] {
+  border-radius: 999px !important;
+}

@@ -1,91 +1,145 @@
 """
 Extracts user profile info for personalized course recommendations.
-Returns a LearningSession with:
-- learning_goal
-- resume
-- job_posting
-- subscription_preference
-- chat_history
-Ensures JSON-only output and language consistency.
 """
-import os
 import json
-from utils.utilities import retry_on_network_error
+import re
+from typing import Optional
+
 from core.learning_session import LearningSession
-from dotenv import load_dotenv
-from google import genai
+from utils.models import get_chat_model
 
-load_dotenv()
-gemini_api = os.getenv('GEMINI_API')
-client = genai.Client(api_key=gemini_api)
 
-@retry_on_network_error(max_retries=5, delay=3)
-def get_user_profile(user_input: str, chat_history=None):
+SYSTEM_PROMPT = """You are Talimci. You collect the user's profile for course
+recommendations by asking ONE question at a time, in this order:
+1. learning_goal (required, free text)
+2. resume (optional, free text) - first ask if they want to share one
+   (closed-choice: share / skip); if they agree, THEN ask them to paste it
+   (open-ended) as the next step
+3. job_posting (optional, free text) - same optional pattern as resume
+4. subscription_preference (required, closed-choice: paid / free / either)
 
-    chat = client.chats.create(model="gemini-2.5-flash")
+You will be given the conversation so far (your previous questions and the
+user's answers, in order). Based on it, figure out what is already known and
+ask for the next missing thing. Never ask about something already answered.
 
-    if chat_history is None:
-        chat_history = []
+Respond with EXACTLY ONE JSON object and NOTHING else (no markdown fences,
+no commentary, no extra keys):
 
-    system_prompt = """
-    You are Talimci, an AI assistant that specializes in personalized learning recommendations.  
-    Your job is to extract user profile information for an education recommendation system.
-    - Respond in the same language the user uses.
-    - First, analyze the user's input and **try to fill all fields automatically**:
-      - "learning_goal": summarize the user's main learning objective in a short, clear sentence. If only a CV or job posting is provided, attempt to infer a relevant learning goal.
-      - "resume": extract if provided; otherwise set internally to 'not_provided'.
-      - "job_posting": extract the job posting or role description from the input; if unclear, leave empty.
-      - "subscription_preference": extract if user mentioned free/paid/all; if unclear, automatically set to 'all'.
-    - After attempting automatic extraction, **ask sequentially only for the missing or unclear fields**:
-      - For 'learning_goal', ask **only once** for more details if the answer is too general. If the user does not provide additional details, accept the short or general answer as valid. Only ask follow-ups if the answer is empty, completely nonsensical, or offensive. Follow-ups:
-        1. Reminds them politely to provide a real learning objective,
-        2. Adapts to the type of input (e.g., nonsense, offensive, irrelevant),
-        3. Encourages a clear learning goal,
-        4. **Different** from previous ones.
-      - For 'resume', 'job_posting' and 'subscription_preference', ask only once each. When asking, provide a short reason why it is useful. If user does not provide an answer, internally set to 'not_provided'. For 'subscription_preference', set to 'all'. **Never phrase this choice to the user. Do not say 'or type not_provided'.**
-    - If the user asks "why", "what is the reason", or any similar clarification: 
-        1. Respond briefly (e.g., "To provide you with more personalized course recommendations" or the equivalent in the user's language). 
-        2. Immediately ask for the missing information again, so the flow of collecting the profile continues without skipping any field.
+A) If there is a next question to ask:
+{"question": "<question text>", "options": [<2-4 short button labels>]}
+- Include "options" ONLY for genuinely closed-choice questions: subscription
+  preference, or "do you want to share your resume/job posting?". For
+  example, in English these would be ["Paid","Free","Either"] or
+  ["I'll share it","Skip"] - but see the LANGUAGE rule below.
+- For open-ended answers (learning_goal, or once the user agreed to paste
+  resume/job_posting text) set "options" to an empty list [] - the user will
+  type a free-text answer in a normal text box.
 
-    - The system should try to infer a meaningful learning_goal from any partial input (CV or job posting). Only if it cannot, it will ask the user for clarification.
+B) Once ALL FOUR fields are known:
+{"learning_goal": "...", "resume": "... or not_provided", "job_posting": "... or not_provided", "subscription_preference": "free|paid|all"}
+- The four values inside this final object must stay as-is (plain text /
+  the literal English tokens "free"/"paid"/"all"/"not_provided") - do NOT
+  translate these, they are internal data, not something shown to the user.
 
-    - Always return **only the final JSON** after all information is collected.
+LANGUAGE RULE (important):
+- Detect the language the user is writing in from their messages in the
+  conversation so far (if they haven't written anything yet, default to
+  English for the very first question).
+- Both the "question" text AND every string inside "options" MUST be fully
+  translated into that language. Never leave them in English if the user is
+  writing in another language - translate the meaning naturally, don't just
+  transliterate. This applies to every question, not just the first one.
 
-    Final JSON structure:
-    {
-      "learning_goal": "short, clear learning objective based on user's input",
-      "resume": "user's resume or 'not_provided'",
-      "job_posting": "user's job posting or 'not_provided'",
-      "subscription_preference": "all, free, or paid (default 'all' if unknown)"
-    }
+Other rules:
+- Never invent values the user hasn't actually given you.
+- If the user declines an optional field (says "skip", "no", "none", or
+  clicks a "skip"-equivalent option, in any language), its final value must
+  be "not_provided".
+- If the user seems confused or asks why you're asking, put a brief
+  explanation INSIDE the "question" field (in the user's language), followed
+  by the same question again - do not move on to the next field in that
+  case.
+- Do not use markdown code blocks."""
 
-    JSON Rules:
-    - Respond only in the following structure: {"learning_goal": "...", "resume": "...", "job_posting": "...", "subscription_preference": "..."}
-    - Both keys and values must be enclosed in double quotes.
-    - Do not use code blocks.
-    - Do not include any additional explanations or comments.
-    """
 
-    chat_history.append({"role": "user", "content": user_input})
-
-    # Chat geçmişini prompt'a dahil et
-    conversation_context = "\n".join(
-        [f"{msg['role'].capitalize()}: {msg['content']}" for msg in chat_history]
-    )
-
-    response = chat.send_message(system_prompt + "\n\nConversation:\n" + conversation_context)
-    message_text = response.text.strip()
-
-    if not message_text:
-        return "LLM did not respond", chat_history
-
+def _extract_json(text: str) -> Optional[dict]:
     try:
-        data = json.loads(message_text)
-        session = LearningSession(**data, chat_history=chat_history)
-        return session, chat_history
-    except json.JSONDecodeError:
-        chat_history.append({"role": "assistant", "content": message_text})
-        return message_text, chat_history
-    except Exception as e:
-        chat_history.append({"role": "assistant", "content": f"Hata: {e}"})
-        return f"Error: {e}", chat_history
+        return json.loads(text.strip())
+    except (ValueError, TypeError):
+        pass
+
+    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if code_block:
+        try:
+            return json.loads(code_block.group(1))
+        except ValueError:
+            pass
+
+    brace_match = re.search(r"(\{.*\})", text, re.DOTALL)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(1))
+        except ValueError:
+            pass
+
+    return None
+
+
+def _build_context(chat_history: list) -> str:
+    if not chat_history:
+        return "(The chat has not started yet - ask the first question.)"
+    lines = []
+    for msg in chat_history:
+        role = "Assistant" if msg.get("role") == "assistant" else "User"
+        lines.append(f"{role}: {msg.get('content', '')}")
+    return "\n".join(lines)
+
+
+_FIRST_QUESTION = (
+    "What would you like to learn, or what's your overall learning goal? "
+    "(e.g. \"I want to learn data analysis with Python\")"
+)
+
+
+def get_next_step(chat_history: list) -> dict:
+    """Sends the chat history to the LLM and requests the next step.
+
+    Returns one of:
+      {"type": "question", "text": str, "options": list[str]}
+      {"type": "done", "session": LearningSession}
+    """
+    if not chat_history:
+        return {"type": "question", "text": _FIRST_QUESTION, "options": []}
+
+    chat = get_chat_model()
+    chat.create_chat(system_prompt=SYSTEM_PROMPT)
+
+    response = chat.send_chat_message(_build_context(chat_history))
+    text = response.text.strip()
+    parsed = _extract_json(text)
+
+    if not parsed:
+        return {"type": "question", "text": text, "options": []}
+
+    if "question" in parsed:
+        options = parsed.get("options") or []
+        if not isinstance(options, list):
+            options = []
+        return {
+            "type": "question",
+            "text": str(parsed.get("question", "")).strip(),
+            "options": [str(o).strip() for o in options if str(o).strip()][:4],
+        }
+
+    required = ["learning_goal", "resume", "job_posting", "subscription_preference"]
+    if all(k in parsed for k in required):
+        session = LearningSession(
+            learning_goal=parsed["learning_goal"],
+            resume=parsed.get("resume") or "not_provided",
+            job_posting=parsed.get("job_posting") or "not_provided",
+            subscription_preference=(parsed.get("subscription_preference") or "all"),
+            chat_history=chat_history,
+        )
+        return {"type": "done", "session": session}
+
+    return {"type": "question", "text": text, "options": []}

@@ -1,0 +1,145 @@
+[project]
+# List of environment variables to be provided by each user to use the app.
+user_env = []
+
+# Duration (in seconds) during which the session is saved when the connection is lost
+session_timeout = 3600
+
+# Duration (in seconds) of the user session expiry
+user_session_timeout = 1296000  # 15 days
+
+# Enable third parties caching (e.g., LangChain cache)
+cache = false
+
+# Whether to persist user environment variables (API keys) to the database
+persist_user_env = false
+
+# Whether to mask user environment variables (API keys) in the UI with password type
+mask_user_env = false
+
+# Authorized origins
+allow_origins = ["*"]
+
+# Keeps chat history in the user's browser/session (can remain false if a persistent DB is not connected)
+enable_telemetry = false
+
+[features]
+# Process and display HTML in messages.
+unsafe_allow_html = false
+
+# Process and display mathematical expressions.
+latex = false
+
+# Enable rendering of user messages markdown
+user_message_markdown = true
+
+# Autoscroll new user messages at the top of the window
+user_message_autoscroll = true
+
+# Autoscroll new assistant messages
+assistant_message_autoscroll = true
+
+# Automatically tag threads with the current chat profile (if a chat profile is used)
+auto_tag_thread = true
+
+# Allow users to edit their own messages
+edit_message = true
+
+# Allow users to share threads (backend + UI).
+allow_thread_sharing = false
+
+# Enable favorite messages
+favorites = false
+
+multi_modal = false
+
+[features.slack]
+reaction_on_message_received = false
+
+# Authorize users to spontaneously upload files with messages
+[features.spontaneous_file_upload]
+    enabled = false
+    accept = ["*/*"]
+    max_files = 20
+    max_size_mb = 500
+
+[features.audio]
+    enabled = false
+    sample_rate = 24000
+
+[features.mcp]
+    enabled = false
+
+[features.mcp.sse]
+    enabled = true
+
+[features.mcp.streamable-http]
+    enabled = true
+
+[features.mcp.stdio]
+    enabled = true
+    allowed_executables = [ "npx", "uvx" ]
+
+[UI]
+# Name displayed on the top left
+name = "Talimci"
+
+# Uses the chainlit.md file on the welcome screen
+default_collapse_content = true
+
+# Chat title / description
+description = "Personalized Course Recommendation Assistant"
+
+# Chain of Thought (CoT) display mode. Can be "hidden", "tool_call" or "full".
+# "full" displays every intermediate step (LLM calls, tool calls, etc.) one by one
+# on the screen - which made the app look like a "debug console" rather than a chatbot.
+# With "hidden", the user only sees the final messages.
+cot = "hidden"
+
+# Whether to prompt user confirmation on clicking 'New Chat'
+confirm_new_chat = true
+
+# The style of alert boxes. Can be "classic" or "modern".
+alert_style = "classic"
+
+# Load assistant logo directly from URL.
+# Left empty: Chainlit automatically uses /public/logo_dark.png and /public/logo_light.png
+# (depending on the theme status) - just add these files to the public/ folder below.
+logo_file_url = ""
+
+# NOTE: Contrary to popular belief, this field is NOT the "general/default user avatar",
+# but means the "assistant's avatar image" in Chainlit. Putting a value here
+# OVERRIDES the automatic matching done with public/avatars/{author}.png
+# (our Talimci.png file). Therefore, we leave it empty - the assistant
+# avatar will automatically come from public/avatars/Talimci.png.
+default_avatar_file_url = "public/avatars/Talimci.png"
+avatar_size = 36
+
+# A custom CSS file for small stylistic touches
+# to make chat bubbles feel more like a "chatbot" (added below as public/stylesheet.css).
+custom_css = "/public/stylesheet.css"
+
+# Brand color (Talimci theme - education/learning themed green-blue tone)
+[UI.theme]
+default = "dark"
+
+[UI.theme.light]
+background = "#FFFFFF"
+paper = "#F7F9FC"
+
+  [UI.theme.light.primary]
+  main = "#0EA5A4"
+  dark = "#0B8483"
+  light = "#5EEAD4"
+
+[UI.theme.dark]
+background = "#0E1117"
+paper = "#161B22"
+
+  [UI.theme.dark.primary]
+  main = "#2DD4BF"
+  dark = "#0EA5A4"
+  light = "#99F6E4"
+
+[meta]
+generated_by = "2.11.1"
